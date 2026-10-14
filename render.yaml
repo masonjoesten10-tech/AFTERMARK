@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: aftermark
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    disk:
+      name: aftermark-data
+      mountPath: /var/data
+      sizeGB: 1
