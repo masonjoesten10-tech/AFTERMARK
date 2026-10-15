@@ -1,4 +1,4 @@
-   """Bounded retries for transient failures; respect Retry-After on HTTP 429."""
+ """Bounded retries for transient failures; respect Retry-After on HTTP 429."""
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, headers={'accept': 'application/json', 'user-agent': USER_AGENT})
         try:
@@ -94,7 +94,7 @@ def best_pair(mint):
         if len(_pair_cache) > 250:
             for key, _ in sorted(_pair_cache.items(), key=lambda item: item[1][0])[:50]:
                 _pair_cache.pop(key, None)
-    return p
+   return p
 
 
 def write_snapshot(p, requested_mint=None):
