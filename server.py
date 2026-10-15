@@ -1,3 +1,99 @@
+   """Bounded retries for transient failures; respect Retry-After on HTTP 429."""
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers={'accept': 'application/json', 'user-agent': USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                wait = None
+                value = exc.headers.get('Retry-After')
+                if value:
+                    try:
+                        wait = max(1.0, float(value))
+                    except ValueError:
+                        try:
+                            wait = max(1.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+                        except Exception:
+                            pass
+                if wait is None:
+                    wait = 2 ** attempt
+                # Never hold a public request for a long time if the provider asks us to wait.
+                if attempt < retries and wait <= 8:
+                    time.sleep(wait)
+                    continue
+            elif exc.code in (500, 502, 503, 504) and attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+    raise RuntimeError('Market data request failed')
+
+
+def _num(v):
+    try: return float(v) if v is not None else None
+    except (ValueError, TypeError): return None
+
+
+def _int(v):
+    try: return int(v) if v is not None else None
+    except (ValueError, TypeError): return None
+
+
+def _valid_mint(mint):
+    return bool(re.fullmatch(r'[1-9A-HJ-NP-Za-km-z]{32,44}', mint or ''))
+
+
+def rowdict(row):
+    return dict(row) if row else None
+
+
+def best_pair(mint):
+    """Resolve exact Solana mint, preferring the most liquid pair; briefly cache success."""
+    if not _valid_mint(mint):
+        raise ValueError('Enter a valid-looking Solana mint address. The ledger requires an exact mint.')
+    now = time.time()
+    with _cache_lock:
+        cached = _pair_cache.get(mint)
+        if cached and now - cached[0] <= CACHE_SECONDS:
+            return dict(cached[1])
+        if cached:
+            _pair_cache.pop(mint, None)
+
+    data = fetch_json(f'{DEX}/token-pairs/v1/solana/{mint}')
+    pairs = [p for p in (data if isinstance(data, list) else []) if p.get('chainId') == 'solana']
+    if not pairs:
+        data = fetch_json(f'{DEX}/latest/dex/search?q={mint}')
+        pairs = [p for p in (data.get('pairs') or []) if p.get('chainId') == 'solana' and
+                 ((p.get('baseToken') or {}).get('address') == mint or (p.get('quoteToken') or {}).get('address') == mint)]
+    base_pairs = [p for p in pairs if (p.get('baseToken') or {}).get('address') == mint]
+    pairs = base_pairs or [p for p in pairs if (p.get('quoteToken') or {}).get('address') == mint]
+    if not pairs:
+        raise ValueError('No Solana pair found for that exact mint. Confirm the address and that a pool exists.')
+    pairs.sort(key=lambda p: _num((p.get('liquidity') or {}).get('usd')) or 0, reverse=True)
+    p = dict(pairs[0])
+    if (p.get('baseToken') or {}).get('address') != mint:
+        old_base, old_quote = p.get('baseToken') or {}, p.get('quoteToken') or {}
+        p['baseToken'], p['quoteToken'] = old_quote, old_base
+        price = _num(p.get('priceUsd'))
+        p['priceUsd'] = (1.0 / price) if price and price > 0 else None
+        p['marketCap'] = None
+        p['fdv'] = None
+        change = _num((p.get('priceChange') or {}).get('h24'))
+        if change is not None and (1.0 + change / 100.0) != 0:
+            p['priceChange'] = dict(p.get('priceChange') or {})
+            p['priceChange']['h24'] = ((1.0 / (1.0 + change / 100.0)) - 1.0) * 100.0
+    if (p.get('baseToken') or {}).get('address') != mint:
+        raise ValueError('Mint identity validation failed; snapshot rejected.')
+    with _cache_lock:
+        _pair_cache[mint] = (time.time(), dict(p))
+        if len(_pair_cache) > 250:
+            for key, _ in sorted(_pair_cache.items(), key=lambda item: item[1][0])[:50]:
+                _pair_cache.pop(key, None)
     return p
 
 
@@ -124,3 +220,4 @@ if __name__ == '__main__':
     print(f'API health: http://{host}:{port}/api/health', flush=True)
     print('No wallet connection, private keys, signing, or trading functionality.', flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()
+
