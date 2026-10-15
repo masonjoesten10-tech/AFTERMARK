@@ -1,4 +1,36 @@
- """Bounded retries for transient failures; respect Retry-After on HTTP 429."""
+#!/usr/bin/env python3
+"""AFTERMARK research server. Standard library only; no wallet, signing, or trading."""
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+import json, os, re, sqlite3, time, threading, urllib.request, urllib.error, email.utils
+
+ROOT = Path(__file__).resolve().parent
+DB = Path(os.environ.get('AFTERMARK_DB_PATH', str(ROOT / 'aftermark.db'))).resolve()
+DB.parent.mkdir(parents=True, exist_ok=True)
+DEX = 'https://api.dexscreener.com'
+GECKO = 'https://api.geckoterminal.com/api/v2'
+USER_AGENT = 'AFTERMARK-research/0.3'
+CACHE_SECONDS = max(5, int(os.environ.get('AFTERMARK_PAIR_CACHE_SECONDS', '30')))
+_pair_cache = {}
+_cache_lock = threading.Lock()
+
+
+def db_conn():
+    c = sqlite3.connect(DB, timeout=15)
+    c.row_factory = sqlite3.Row
+    c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+      id INTEGER PRIMARY KEY, captured_at INTEGER NOT NULL, chain TEXT NOT NULL,
+      mint TEXT NOT NULL, pair_address TEXT, symbol TEXT, name TEXT, price_usd REAL,
+      market_cap REAL, fdv REAL, liquidity_usd REAL, volume_24h REAL,
+      change_24h REAL, buys_24h INTEGER, sells_24h INTEGER, source TEXT NOT NULL)''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_snap_mint_time ON snapshots(mint,captured_at)')
+    c.commit()
+    return c
+
+
+def fetch_json(url, timeout=18, retries=2):
+    """Bounded retries for transient failures; respect Retry-After on HTTP 429."""
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, headers={'accept': 'application/json', 'user-agent': USER_AGENT})
         try:
@@ -94,7 +126,7 @@ def best_pair(mint):
         if len(_pair_cache) > 250:
             for key, _ in sorted(_pair_cache.items(), key=lambda item: item[1][0])[:50]:
                 _pair_cache.pop(key, None)
-   return p
+    return p
 
 
 def write_snapshot(p, requested_mint=None):
